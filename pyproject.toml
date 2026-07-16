@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vox-agent"
+version = "0.1.0"
+description = "Autonomous real-time voice agent: sub-500ms streaming STT -> LLM (function calling) -> TTS, with barge-in interruption. Offline-first, zero runtime dependencies."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Akhil Vase" }]
+keywords = [
+  "voice-agent", "real-time", "streaming", "speech-to-text", "text-to-speech",
+  "llm", "function-calling", "websockets", "asyncio", "low-latency", "vad", "barge-in",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Topic :: Multimedia :: Sound/Audio :: Speech",
+  "Framework :: AsyncIO",
+]
+# Core runtime has ZERO third-party dependencies. Everything below is optional.
+dependencies = []
+
+[project.optional-dependencies]
+# Real-time WebSocket server + web client
+server = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "websockets>=12"]
+# Real provider adapters (only needed if you wire up paid APIs)
+deepgram = ["deepgram-sdk>=3.0"]
+groq = ["groq>=0.9"]
+openai = ["openai>=1.30"]
+cartesia = ["cartesia>=1.0"]
+elevenlabs = ["elevenlabs>=1.0"]
+redis = ["redis>=5.0"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5", "mypy>=1.10"]
+
+[project.scripts]
+vox = "vox_agent.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/avase33/vox-agent"
+Repository = "https://github.com/avase33/vox-agent"
+
+[tool.setuptools.packages.find]
+include = ["vox_agent*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

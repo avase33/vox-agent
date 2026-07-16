@@ -1,0 +1,23 @@
+services:
+  vox:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Flip these to real providers and add keys to go from demo to production.
+      VOX_STT: ${VOX_STT:-mock}
+      VOX_LLM: ${VOX_LLM:-mock}
+      VOX_TTS: ${VOX_TTS:-mock}
+      VOX_STATE: ${VOX_STATE:-memory}
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      CARTESIA_API_KEY: ${CARTESIA_API_KEY:-}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+
+  # Optional: only used when VOX_STATE=redis
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"

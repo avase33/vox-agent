@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>vox-agent · real-time voice</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 15px/1.5 -apple-system, system-ui, Segoe UI, Roboto, sans-serif;
+    background: radial-gradient(1200px 600px at 50% -10%, #16243b, #0a0f1a) fixed;
+    color: #e7eef7; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  }
+  .app { width: min(680px, 94vw); padding: 28px; }
+  h1 { font-size: 22px; margin: 0 0 2px; }
+  .sub { color: #8aa0bd; margin: 0 0 20px; font-size: 13px; }
+  .card { background: #0f1726cc; border: 1px solid #1e2c44; border-radius: 16px; padding: 18px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  button {
+    border: 0; border-radius: 10px; padding: 11px 18px; font-weight: 600; cursor: pointer;
+    background: #2f6df6; color: white; transition: transform .05s ease, background .2s;
+  }
+  button:hover { background: #4880ff; } button:active { transform: translateY(1px); }
+  button.stop { background: #b23b57; } button:disabled { opacity: .4; cursor: not-allowed; }
+  .orb { width: 14px; height: 14px; border-radius: 50%; background: #43506a; transition: .2s; }
+  .orb.live { background: #35d07f; box-shadow: 0 0 14px #35d07f; }
+  .orb.speaking { background: #4880ff; box-shadow: 0 0 16px #4880ff; animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .5; } }
+  #log { margin-top: 16px; max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+  .msg { padding: 9px 13px; border-radius: 12px; max-width: 82%; white-space: pre-wrap; }
+  .agent { background: #14233b; align-self: flex-start; border-bottom-left-radius: 3px; }
+  .you   { background: #26344d; align-self: flex-end; border-bottom-right-radius: 3px; }
+  .sys   { align-self: center; color: #7f95b3; font-size: 12px; background: transparent; }
+  .metrics { margin-top: 12px; font-size: 12px; color: #8aa0bd; font-variant-numeric: tabular-nums; }
+  input[type=text] {
+    flex: 1; min-width: 180px; background: #0b1220; border: 1px solid #23324c; color: #e7eef7;
+    padding: 11px 13px; border-radius: 10px;
+  }
+  code { color: #9fc1ff; }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>vox-agent</h1>
+  <p class="sub">Autonomous real-time voice receptionist · streaming STT → LLM (function calling) → TTS · barge-in</p>
+  <div class="card">
+    <div class="row">
+      <button id="call">Start call</button>
+      <button id="hang" class="stop" disabled>Hang up</button>
+      <span class="orb" id="orb"></span>
+      <span id="state" style="color:#8aa0bd">idle</span>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <input id="text" type="text" placeholder="Type what the caller says, or use the mic…" disabled />
+      <button id="send" disabled>Send</button>
+      <button id="mic" disabled>🎙 Mic</button>
+    </div>
+    <div id="log"></div>
+    <div class="metrics" id="metrics"></div>
+  </div>
+  <p class="sub" style="margin-top:14px">
+    Offline mode uses synthetic tone audio + the browser's speech recognition.
+    Configure <code>VOX_TTS=cartesia</code> etc. server-side for real voices.
+  </p>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+let ws = null, ac = null, nextTime = 0, playing = false, rec = null, agentSpeaking = false;
+
+function log(text, cls) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls; d.textContent = text;
+  $('log').appendChild(d); $('log').scrollTop = $('log').scrollHeight;
+  return d;
+}
+function setState(s, orbCls) {
+  $('state').textContent = s;
+  $('orb').className = 'orb ' + (orbCls || '');
+}
+
+function playPCM(arrayBuffer, sampleRate) {
+  if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+  const pcm = new Int16Array(arrayBuffer);
+  if (!pcm.length) return;
+  const buf = ac.createBuffer(1, pcm.length, sampleRate || 16000);
+  const ch = buf.getChannelData(0);
+  for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+  const src = ac.createBufferSource(); src.buffer = buf; src.connect(ac.destination);
+  const now = ac.currentTime;
+  if (nextTime < now) nextTime = now;
+  src.start(nextTime); nextTime += buf.duration;
+  agentSpeaking = true; setState('speaking', 'speaking');
+  src.onended = () => { if (nextTime <= ac.currentTime + 0.02) { agentSpeaking = false; setState('listening', 'live'); } };
+}
+function stopPlayback() {
+  if (ac) { ac.close(); ac = null; nextTime = 0; }
+  agentSpeaking = false;
+}
+
+let pendingSR = 16000;
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws/voice`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { setState('listening', 'live'); enable(true); log('— call connected —', 'sys'); };
+  ws.onclose = () => { setState('idle', ''); enable(false); log('— call ended —', 'sys'); };
+  ws.onmessage = (e) => {
+    if (typeof e.data !== 'string') { playPCM(e.data, pendingSR); return; }
+    const m = JSON.parse(e.data);
+    if (m.type === 'audio_info') pendingSR = m.sample_rate;
+    else if (m.type === 'agent_text' && m.text) log(m.text, 'agent');
+    else if (m.type === 'user_final' && m.text) log(m.text, 'you');
+    else if (m.type === 'tool') log(`⚙ ${m.name}(${JSON.stringify(m.arguments)})`, 'sys');
+    else if (m.type === 'redacted') log(`🔒 redacted ${m.types.join(', ')}`, 'sys');
+    else if (m.type === 'metrics') $('metrics').textContent =
+      `ttfb ${m.ttfb_ms} ms · think ${m.ttft_ms} ms · total ${m.total_ms} ms · tools ${m.tool_calls}`;
+    else if (m.type === 'call_end') { setTimeout(hangup, 400); }
+  };
+}
+function send(text) {
+  if (ws && ws.readyState === 1 && text.trim()) ws.send(JSON.stringify({ type: 'say', text }));
+}
+function bargeIn() {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'interrupt' }));
+  stopPlayback();
+}
+
+function enable(on) {
+  $('call').disabled = on; $('hang').disabled = !on;
+  $('text').disabled = !on; $('send').disabled = !on; $('mic').disabled = !on;
+}
+function hangup() { if (ws) ws.close(); stopPlayback(); if (rec) try { rec.stop(); } catch {} }
+
+$('call').onclick = () => { $('log').innerHTML = ''; connect(); };
+$('hang').onclick = hangup;
+$('send').onclick = () => { send($('text').value); $('text').value = ''; };
+$('text').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('send').click(); });
+
+// Browser speech recognition (on-device STT) — free, offline-friendly.
+$('mic').onclick = () => {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { log('Speech recognition not supported in this browser — type instead.', 'sys'); return; }
+  if (rec) { rec.stop(); rec = null; $('mic').textContent = '🎙 Mic'; return; }
+  rec = new SR(); rec.continuous = true; rec.interimResults = true; rec.lang = 'en-US';
+  $('mic').textContent = '🔴 Listening';
+  rec.onspeechstart = () => { if (agentSpeaking) bargeIn(); };  // barge-in!
+  rec.onresult = (e) => {
+    const r = e.results[e.results.length - 1];
+    if (r.isFinal) send(r[0].transcript);
+  };
+  rec.onend = () => { if (rec) rec.start(); };
+  rec.start();
+};
+</script>
+</body>
+</html>
